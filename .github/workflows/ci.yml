@@ -1,0 +1,98 @@
+name: CI
+
+# Design note: this repo's real deploy flow (terragrunt init/plan/apply) configures
+# an S3 remote-state backend per environment (see envs/*/terragrunt.hcl) and needs
+# real AWS credentials. This repository does not wire any AWS credentials into
+# GitHub Actions, so CI intentionally never invokes terragrunt against envs/dev or
+# envs/prod. Instead it validates the two things that don't require a backend or
+# credentials at all: Terraform formatting across the whole repo, and the shared
+# `modules/s3-bucket` module in isolation via `terraform init -backend=false`, which
+# is the actual infrastructure logic reused by both environments. Terragrunt HCL
+# syntax/formatting is checked separately with `terragrunt hclfmt`, which also never
+# touches a backend.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  terraform-fmt:
+    name: Terraform fmt check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+          terraform_wrapper: false
+
+      - name: terraform fmt -check -recursive
+        run: terraform fmt -check -recursive -diff
+
+  validate-module:
+    name: Validate shared s3-bucket module
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+          terraform_wrapper: false
+
+      # No AWS credentials are configured in this workflow on purpose. We validate
+      # the module directly (not through terragrunt) so no backend config is ever
+      # touched: -backend=false skips backend initialization entirely.
+      - name: terraform init (no backend)
+        working-directory: aws-terraform-terragrunt/modules/s3-bucket
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        working-directory: aws-terraform-terragrunt/modules/s3-bucket
+        run: terraform validate
+
+  terragrunt-hclfmt:
+    name: Terragrunt HCL format check
+    runs-on: ubuntu-latest
+    env:
+      TERRAGRUNT_VERSION: "0.72.6"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Terragrunt
+        run: |
+          curl -sSL -o /usr/local/bin/terragrunt \
+            "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+          chmod +x /usr/local/bin/terragrunt
+          terragrunt --version
+
+      # hclfmt only parses/formats HCL files; it never contacts AWS or reads state.
+      - name: terragrunt hclfmt --check
+        run: terragrunt hclfmt --terragrunt-check --terragrunt-working-dir aws-terraform-terragrunt
+
+  checkov:
+    name: Checkov static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checkov
+        run: pip install checkov
+
+      - name: Run checkov against the shared module
+        run: checkov -d aws-terraform-terragrunt/modules --compact --quiet --soft-fail
