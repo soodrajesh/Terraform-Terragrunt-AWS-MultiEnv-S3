@@ -1,353 +1,123 @@
+## Terraform + Terragrunt AWS Multi-Env S3
 
-# AWS Terraform Terragrunt Infrastructure Project
+A small Terragrunt setup that provisions a private S3 bucket in two AWS environments, dev and prod, from a single Terraform module. The point of the repo is the layering, not the resource: one `s3-bucket` module gets reused per environment with its own AWS region, remote state location, and tags, without copy-pasting the `.tf` files themselves.
 
-This project demonstrates a scalable and maintainable approach to managing AWS infrastructure using Terraform and Terragrunt. It provides a modular structure for managing S3 buckets across multiple environments with proper state management and CI/CD integration.
+There's no application workload here. This is infrastructure-as-code scaffolding you'd extend with more modules (VPC, IAM, whatever) once the environment/state pattern is in place.
 
-## 🏗️ Architecture Overview
+## Architecture
 
-The project follows a modular architecture with:
-- **Reusable Terraform modules** for infrastructure components
-- **Environment-specific configurations** for development and production
-- **Terragrunt** for DRY (Don't Repeat Yourself) configuration management
-- **Jenkins CI/CD pipeline** for automated deployments
-- **Remote state management** using S3 backend
+```mermaid
+flowchart TD
+    subgraph Module["aws-terraform-terragrunt/modules/s3-bucket"]
+        MainTf["main.tf: aws_s3_bucket + public_access_block"]
+        VarsTf["variables.tf: bucket_name, env, tags"]
+        OutTf["outputs.tf: bucket_id, bucket_arn"]
+    end
 
-## 📁 Project Structure
+    subgraph Dev["envs/dev"]
+        DevTg["terragrunt.hcl\nsource = ../../modules/s3-bucket\ninputs.env = dev"]
+        DevProvider["provider.tf: aws, us-west-2, your-dev-profile"]
+        DevVars["variables.tf (overrides module copy)"]
+        DevTfvars["terraform.tfvars: bucket_name, tags"]
+        DevState[("S3 state bucket\nyour-terraform-state-bucket\nkey: dev/terraform.tfstate\nus-west-2")]
+    end
 
-```
-aws-terraform-terragrunt/
-├── aws-terraform-terragrunt/
-│   ├── modules/
-│   │   └── s3-bucket/           # Reusable S3 bucket module
-│   │       ├── main.tf          # Main Terraform configuration
-│   │       ├── variables.tf     # Input variables
-│   │       └── outputs.tf       # Output values
-│   ├── envs/
-│   │   ├── dev/                 # Development environment
-│   │   │   ├── terragrunt.hcl   # Terragrunt configuration
-│   │   │   ├── backend.hcl      # Backend configuration
-│   │   │   ├── provider.tf      # AWS provider configuration
-│   │   │   └── variables.tf     # Environment variables
-│   │   └── prod/                # Production environment
-│   │       ├── terragrunt.hcl   # Terragrunt configuration
-│   │       ├── backend.hcl      # Backend configuration
-│   │       ├── provider.tf      # AWS provider configuration
-│   │       └── variables.tf     # Environment variables
-│   └── ci-cd/
-│       └── jenkins/
-│           └── terraform-pipeline.groovy  # Jenkins pipeline
-├── script.sh                    # Project setup script
-├── README.md                    # This file
-└── .gitignore                   # Git ignore rules
-```
+    subgraph Prod["envs/prod"]
+        ProdTg["terragrunt.hcl\nsource = ../../modules/s3-bucket\ninputs.env = prod"]
+        ProdProvider["provider.tf: aws, us-east-1, your-prod-profile"]
+        ProdVars["variables.tf (overrides module copy)"]
+        ProdTfvars["terraform.tfvars: bucket_name, tags"]
+        ProdState[("S3 state bucket\nyour-prod-terraform-state-bucket\nkey: prod/terraform.tfstate\nus-east-1")]
+    end
 
-## 🚀 Features
+    DevTg -->|copies module + sibling files into .terragrunt-cache| Module
+    ProdTg -->|copies module + sibling files into .terragrunt-cache| Module
+    DevProvider -.merged into working copy.-> Module
+    DevVars -.merged into working copy.-> Module
+    ProdProvider -.merged into working copy.-> Module
+    ProdVars -.merged into working copy.-> Module
 
-### Infrastructure Components
-- **S3 Buckets**: Secure, private S3 buckets with public access blocking
-- **State Management**: Remote state storage in S3 with encryption
-- **Environment Isolation**: Separate configurations for dev and prod
-- **Security**: Proper IAM roles, security groups, and access controls
+    DevTg -->|remote_state backend| DevState
+    ProdTg -->|remote_state backend| ProdState
 
-### DevOps Features
-- **Terragrunt**: DRY configuration management
-- **Modular Design**: Reusable Terraform modules
-- **CI/CD Pipeline**: Automated deployment with Jenkins
-- **Environment Management**: Consistent deployment across environments
+    Module --> DevBucket["S3 bucket: {bucket_name}-dev"]
+    Module --> ProdBucket["S3 bucket: {bucket_name}-prod"]
 
-## 📋 Prerequisites
-
-### Required Tools
-- **Terraform** (>= 1.0.0)
-- **Terragrunt** (>= 0.35.0)
-- **AWS CLI** (>= 2.0.0)
-- **Jenkins** (for CI/CD pipeline)
-
-### AWS Requirements
-- AWS account with appropriate permissions
-- S3 bucket for Terraform state storage
-- IAM roles and policies for Terraform execution
-- AWS credentials configured locally
-
-### Jenkins Requirements
-- Jenkins server with required plugins
-- AWS credentials configured in Jenkins
-- Git repository access
-
-## 🔧 Setup Instructions
-
-### 1. Clone and Configure Repository
-
-```bash
-git clone <your-repository-url>
-cd aws-terraform-terragrunt
+    Jenkins["ci-cd/jenkins/terraform-pipeline.groovy\nparam: ENV (dev/prod)"] -.manual trigger.-> DevTg
+    Jenkins -.manual trigger.-> ProdTg
 ```
 
-### 2. Configure AWS Credentials
+Terragrunt is doing one real job here: each `envs/<name>/terragrunt.hcl` sets `source = "../../modules/s3-bucket"`, and at `terragrunt init` time it downloads that module into `.terragrunt-cache/` and copies every other file sitting next to the `terragrunt.hcl` (`provider.tf`, `variables.tf`) into the same working directory before running Terraform. That's why the AWS provider block and region live per-environment instead of inside the module, and why I didn't need two copies of `main.tf`. I checked this by running `terragrunt init` against `envs/dev` and inspecting `.terragrunt-cache`: the per-env `variables.tf` silently overwrites the module's own `variables.tf` (same filename, same directory) because it declares the same three variables with a stricter type on `env`. It works, but it's an implicit override by filename collision rather than something you'd notice reading the module in isolation — a `generate` block would have made the intent explicit.
 
-1. **Set up AWS profiles**:
-   ```bash
-   aws configure --profile your-dev-profile
-   aws configure --profile your-prod-profile
-   ```
+Plain Terraform could do this too with `-backend-config` flags and a `terraform.tfvars` per environment, but you'd be hand-running `init -reconfigure` every time you switched environments and there's no single place enforcing that dev and prod use the same module version. Terragrunt's `remote_state` block generates the backend config from HCL instead of a separate `-backend-config` file, and `inputs` passes `env` into the module without it needing to live in a tracked `.tfvars` file. What this repo does not do is use a root `terragrunt.hcl` with an `include` block — each environment's `remote_state` block is typed out by hand (bucket, key, region, encrypt repeated twice), so the "DRY" story only covers the module, not the backend/provider wiring. A root config with `path_relative_to_include()` deriving the state key would remove that duplication; I left it as-is rather than restructuring the layout for a two-environment repo.
 
-2. **Update provider configurations**:
-   - Edit `envs/dev/provider.tf` and replace `your-dev-profile`
-   - Edit `envs/prod/provider.tf` and replace `your-prod-profile`
+## Project structure
 
-### 3. Configure State Management
+```
+.
+├── README.md
+├── SECURITY.md
+├── script.sh                          # scaffolds the directory/file skeleton (touch, not codegen)
+├── validate.sh                        # local sanity checks: tool versions, placeholder values, terragrunt-info
+└── aws-terraform-terragrunt/
+    ├── ci-cd/
+    │   └── jenkins/
+    │       └── terraform-pipeline.groovy   # declarative pipeline, ENV param (dev/prod), not wired to a live Jenkins job
+    ├── envs/
+    │   ├── dev/
+    │   │   ├── backend.hcl              # same values as the remote_state block below, kept for validate.sh's grep checks
+    │   │   ├── provider.tf              # aws provider, us-west-2, profile placeholder
+    │   │   ├── terraform.tfvars.example
+    │   │   ├── terragrunt.hcl           # source, remote_state, inputs.env = "dev"
+    │   │   └── variables.tf
+    │   └── prod/
+    │       ├── backend.hcl
+    │       ├── provider.tf              # aws provider, us-east-1, profile placeholder
+    │       ├── terraform.tfvars.example
+    │       ├── terragrunt.hcl           # source, remote_state, inputs.env = "prod"
+    │       └── variables.tf
+    └── modules/
+        └── s3-bucket/
+            ├── main.tf                  # aws_s3_bucket + aws_s3_bucket_public_access_block
+            ├── outputs.tf                # bucket_id, bucket_arn
+            └── variables.tf
+```
 
-1. **Create S3 buckets for state storage**:
-   ```bash
-   # Development state bucket
-   aws s3 mb s3://your-terraform-state-bucket --region us-west-2
-   aws s3api put-bucket-versioning --bucket your-terraform-state-bucket --versioning-configuration Status=Enabled
-   
-   # Production state bucket
-   aws s3 mb s3://your-prod-terraform-state-bucket --region us-east-1
-   aws s3api put-bucket-versioning --bucket your-prod-terraform-state-bucket --versioning-configuration Status=Enabled
-   ```
+There's no `staging` environment despite that being the common third leg of this pattern — it's just dev and prod.
 
-2. **Update backend configurations**:
-   - Edit `envs/dev/backend.hcl` and `envs/dev/terragrunt.hcl`
-   - Edit `envs/prod/backend.hcl` and `envs/prod/terragrunt.hcl`
-   - Replace bucket names with your actual S3 bucket names
+## How to run this
 
-### 4. Configure Environment Variables
+You need Terraform 1.10+, Terragrunt, an AWS CLI profile, and an S3 bucket that already exists for state storage (this repo doesn't bootstrap its own backend bucket).
 
-1. **Create terraform.tfvars files**:
-   ```bash
-   # Development
-   cp envs/dev/variables.tf envs/dev/terraform.tfvars
-   # Edit envs/dev/terraform.tfvars with your values
-   
-   # Production
-   cp envs/prod/variables.tf envs/prod/terraform.tfvars
-   # Edit envs/prod/terraform.tfvars with your values
-   ```
-
-2. **Set required variables**:
-   - `bucket_name`: Base name for your S3 bucket
-   - `tags`: Environment-specific tags
-
-### 5. Configure Jenkins Pipeline
-
-1. **Update pipeline configuration**:
-   - Edit `ci-cd/jenkins/terraform-pipeline.groovy`
-   - Replace `your-dev-profile` and `your-prod-profile`
-   - Update repository URL
-
-2. **Set up Jenkins job**:
-   - Create new Pipeline job
-   - Configure SCM to point to your repository
-   - Set pipeline script from SCM
-
-## 🚀 Usage
-
-### Manual Deployment
-
-#### Development Environment
 ```bash
 cd aws-terraform-terragrunt/envs/dev
+cp terraform.tfvars.example terraform.tfvars   # fill in bucket_name and tags
+# edit provider.tf to point at a real AWS profile instead of your-dev-profile
+# edit terragrunt.hcl / backend.hcl to point at a real state bucket instead of your-terraform-state-bucket
 
-# Initialize Terragrunt
 terragrunt init
-
-# Plan changes
 terragrunt plan
-
-# Apply changes
 terragrunt apply
 ```
 
-#### Production Environment
-```bash
-cd aws-terraform-terragrunt/envs/prod
+Same steps from `aws-terraform-terragrunt/envs/prod`, with the `us-east-1` region and prod placeholders.
 
-# Initialize Terragrunt
-terragrunt init
-
-# Plan changes
-terragrunt plan
-
-# Apply changes
-terragrunt apply
-```
-
-### Automated Deployment
-
-1. **Trigger Jenkins pipeline**:
-   - Go to Jenkins dashboard
-   - Select your Terraform pipeline job
-   - Choose environment (dev/prod)
-   - Click "Build with Parameters"
-
-2. **Monitor deployment**:
-   - Check Jenkins build logs
-   - Verify AWS resources creation
-   - Review Terraform outputs
-
-## 🔒 Security Considerations
-
-### ⚠️ **IMPORTANT: Security Best Practices**
-
-1. **Never commit sensitive information**:
-   - AWS access keys and secret keys
-   - Passwords and tokens
-   - Private keys and certificates
-   - Database credentials
-
-2. **Use secure credential management**:
-   - Store credentials in Jenkins credentials store
-   - Use AWS IAM roles when possible
-   - Rotate credentials regularly
-
-3. **Follow the principle of least privilege**:
-   - Grant minimal required permissions
-   - Use IAM policies to restrict access
-   - Regular permission reviews
-
-4. **Monitor and audit**:
-   - Enable CloudTrail logging
-   - Monitor access patterns
-   - Regular security assessments
-
-### Security Features Implemented
-
-- ✅ **S3 Bucket Security**: Public access blocking enabled
-- ✅ **State Encryption**: Remote state stored with encryption
-- ✅ **Environment Isolation**: Separate state and configurations
-- ✅ **IAM Roles**: Proper role-based access control
-- ✅ **No Hardcoded Secrets**: All sensitive data externalized
-
-## 📊 Module Documentation
-
-### S3 Bucket Module
-
-The S3 bucket module creates a secure, private S3 bucket with the following features:
-
-#### Input Variables
-- `bucket_name`: Base name for the S3 bucket
-- `env`: Environment name (dev/prod)
-- `tags`: Map of tags to apply to the bucket
-
-#### Outputs
-- `bucket_id`: The name of the created bucket
-- `bucket_arn`: The ARN of the created bucket
-
-#### Security Features
-- Private ACL
-- Public access blocking
-- Encryption enabled
-- Versioning enabled
-
-## 🔧 Configuration
-
-### Environment-Specific Configuration
-
-Each environment has its own configuration files:
-
-#### Development (`envs/dev/`)
-- **Region**: us-west-2
-- **Profile**: your-dev-profile
-- **State Bucket**: your-terraform-state-bucket
-- **State Key**: dev/terraform.tfstate
-
-#### Production (`envs/prod/`)
-- **Region**: us-east-1
-- **Profile**: your-prod-profile
-- **State Bucket**: your-prod-terraform-state-bucket
-- **State Key**: prod/terraform.tfstate
-
-### Terragrunt Configuration
-
-Terragrunt is used to:
-- Manage remote state configuration
-- Pass common variables to modules
-- Ensure consistent deployment across environments
-- Reduce code duplication
-
-## 🛠️ Troubleshooting
-
-### Common Issues
-
-#### Terragrunt Init Fails
-- Verify S3 bucket exists and is accessible
-- Check AWS credentials and permissions
-- Ensure backend configuration is correct
-
-#### AWS Profile Issues
-- Verify AWS profiles are configured correctly
-- Check profile permissions
-- Ensure credentials are valid
-
-#### State Lock Issues
-- Check if another process is using the state
-- Verify DynamoDB table exists (if using state locking)
-- Check IAM permissions for state operations
-
-### Debug Commands
+To plan both environments in one shot, run from the `envs/` directory:
 
 ```bash
-# Check AWS credentials
-aws sts get-caller-identity --profile your-dev-profile
-
-# Check S3 bucket access
-aws s3 ls s3://your-terraform-state-bucket
-
-# Validate Terraform configuration
-terragrunt validate
-
-# Show Terragrunt configuration
-terragrunt terragrunt-info
+cd aws-terraform-terragrunt/envs
+terragrunt run-all plan
 ```
 
-## 📈 Best Practices
+`run-all` discovers every `terragrunt.hcl` under the current directory and works here even without a root config, since dev and prod don't depend on each other.
 
-### Infrastructure Management
-1. **Use modules** for reusable components
-2. **Version your modules** for consistency
-3. **Use remote state** for team collaboration
-4. **Implement proper tagging** for resource management
+## Known gaps
 
-### Security
-1. **Follow least privilege principle**
-2. **Use IAM roles instead of access keys**
-3. **Enable CloudTrail logging**
-4. **Regular security audits**
-
-### CI/CD
-1. **Automate deployments** with proper approvals
-2. **Use environment-specific configurations**
-3. **Implement proper testing** before production
-4. **Monitor deployments** and rollback procedures
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test in development environment
-5. Submit a pull request
-6. Ensure all tests pass
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🆘 Support
-
-For issues and questions:
-1. Check the troubleshooting section
-2. Review Terraform and Terragrunt documentation
-3. Contact the DevOps team
-4. Check AWS support if needed
-
-## 📚 Resources
-
-- [Terraform Documentation](https://www.terraform.io/docs/)
-- [Terragrunt Documentation](https://terragrunt.gruntwork.io/)
-- [AWS Provider Documentation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
-- [Jenkins Pipeline Documentation](https://www.jenkins.io/doc/book/pipeline/)
-
-
+- **No root `terragrunt.hcl`.** Each environment repeats its own `remote_state` block by hand instead of inheriting one through `include`. Fine for two environments, would get annoying at five.
+- **No provider version pinning.** There's no `required_providers` block anywhere, so `terraform init` pulls whatever the latest AWS provider is. The module sets `acl = "private"` directly on `aws_s3_bucket`, which is deprecated behavior removed in newer provider major versions — on a fresh install this may need a separate `aws_s3_bucket_acl` resource to actually apply.
+- **`backend.hcl` files aren't used by Terraform or Terragrunt.** The `remote_state` block in each `terragrunt.hcl` already generates the backend config; `backend.hcl` duplicates the same values and is only read by `validate.sh`'s grep checks. Two places to update if a bucket name changes.
+- **Everything is a placeholder.** `your-dev-profile`, `your-terraform-state-bucket`, `your-prod-profile`, and the repository URL in the Jenkins pipeline all need manual substitution before anything in this repo runs. There's no bootstrap script that creates the state bucket itself.
+- **No CI pipeline in this repo.** `terraform-pipeline.groovy` is a Jenkinsfile you'd point a Jenkins job at, but there's no Jenkins instance, GitHub Actions workflow, or any automation actually running plan/apply from a push in this repository.
+- **No automated tests.** `validate.sh` is a manual script (tool versions, placeholder greps, `terragrunt-info`) you run yourself; there's no Terratest, no `terraform validate` in CI, nothing that runs unattended.
+- **State locking depends on Terraform's native S3 lockfile (`use_lockfile = true`)**, not a DynamoDB table. That needs Terraform 1.10+; older Terraform versions expecting a lock table won't work against this backend config as written.
+- **README previously referenced a LICENSE file that doesn't exist in this repo.** No license is currently declared.

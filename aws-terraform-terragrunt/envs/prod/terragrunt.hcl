@@ -4,7 +4,7 @@ terraform {
   extra_arguments "common_vars" {
     commands = ["plan", "apply", "destroy"]
     arguments = [
-      "-var-file=../../vars/dev.tfvars"
+      "-var-file=${get_terragrunt_dir()}/terraform.tfvars"
     ]
   }
 }
@@ -17,4 +17,10 @@ remote_state {
     region         = "us-east-1"
     encrypt        = true
   }
+}
+
+# Include any inputs that should be passed to the module
+inputs = {
+  # You can override or add to variables from tfvars files here
+  env = "prod"
 }
