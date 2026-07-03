@@ -1,5 +1,7 @@
 ## Terraform + Terragrunt AWS Multi-Env S3
 
+[![CI](https://github.com/soodrajesh/Terraform-Terragrunt-AWS-MultiEnv-S3/actions/workflows/ci.yml/badge.svg)](https://github.com/soodrajesh/Terraform-Terragrunt-AWS-MultiEnv-S3/actions/workflows/ci.yml)
+
 A small Terragrunt setup that provisions a private S3 bucket in two AWS environments, dev and prod, from a single Terraform module. The point of the repo is the layering, not the resource: one `s3-bucket` module gets reused per environment with its own AWS region, remote state location, and tags, without copy-pasting the `.tf` files themselves.
 
 There's no application workload here. This is infrastructure-as-code scaffolding you'd extend with more modules (VPC, IAM, whatever) once the environment/state pattern is in place.
@@ -59,6 +61,9 @@ Plain Terraform could do this too with `-backend-config` flags and a `terraform.
 ├── SECURITY.md
 ├── script.sh                          # scaffolds the directory/file skeleton (touch, not codegen)
 ├── validate.sh                        # local sanity checks: tool versions, placeholder values, terragrunt-info
+├── .github/
+│   └── workflows/
+│       └── ci.yml                     # fmt check, module validate (no backend), terragrunt hclfmt, checkov (soft-fail)
 └── aws-terraform-terragrunt/
     ├── ci-cd/
     │   └── jenkins/
@@ -117,7 +122,7 @@ terragrunt run-all plan
 - **No provider version pinning.** There's no `required_providers` block anywhere, so `terraform init` pulls whatever the latest AWS provider is. The module sets `acl = "private"` directly on `aws_s3_bucket`, which is deprecated behavior removed in newer provider major versions — on a fresh install this may need a separate `aws_s3_bucket_acl` resource to actually apply.
 - **`backend.hcl` files aren't used by Terraform or Terragrunt.** The `remote_state` block in each `terragrunt.hcl` already generates the backend config; `backend.hcl` duplicates the same values and is only read by `validate.sh`'s grep checks. Two places to update if a bucket name changes.
 - **Everything is a placeholder.** `your-dev-profile`, `your-terraform-state-bucket`, `your-prod-profile`, and the repository URL in the Jenkins pipeline all need manual substitution before anything in this repo runs. There's no bootstrap script that creates the state bucket itself.
-- **No CI pipeline in this repo.** `terraform-pipeline.groovy` is a Jenkinsfile you'd point a Jenkins job at, but there's no Jenkins instance, GitHub Actions workflow, or any automation actually running plan/apply from a push in this repository.
-- **No automated tests.** `validate.sh` is a manual script (tool versions, placeholder greps, `terragrunt-info`) you run yourself; there's no Terratest, no `terraform validate` in CI, nothing that runs unattended.
+- **CI validates the module and formatting, not the full terragrunt+backend flow.** `.github/workflows/ci.yml` runs `terraform fmt -check`, `terraform init -backend=false && terraform validate` against `modules/s3-bucket` directly, `terragrunt hclfmt --check`, and a soft-fail `checkov` scan on every push/PR. It deliberately never runs `terragrunt init/plan/apply` against `envs/dev` or `envs/prod`, because both environments' `remote_state` blocks point at a real S3 bucket and this repo has no AWS credentials wired into GitHub Actions (and isn't getting any). Validating the shared module in isolation is the more important signal anyway, since that's the actual infrastructure logic reused by both environments. `terraform-pipeline.groovy` is still a Jenkinsfile you'd point a Jenkins job at, but there's no Jenkins instance running it.
+- **No automated tests against real infrastructure.** `validate.sh` is a manual script (tool versions, placeholder greps, `terragrunt-info`) you run yourself; there's no Terratest and no CI job that actually plans/applies against dev or prod (see above for why).
 - **State locking depends on Terraform's native S3 lockfile (`use_lockfile = true`)**, not a DynamoDB table. That needs Terraform 1.10+; older Terraform versions expecting a lock table won't work against this backend config as written.
 - **README previously referenced a LICENSE file that doesn't exist in this repo.** No license is currently declared.
